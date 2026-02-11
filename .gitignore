@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Modelos e cache (grandes)
+models/*.pt
+frame_cache/
+results/
+
+# Dataset RWF-2000 (~2GB - baixe separadamente)
+RWF-2000/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
