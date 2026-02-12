@@ -9,7 +9,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 from tqdm import tqdm
 
 from config import (
@@ -22,8 +23,11 @@ from model import get_model
 
 
 def train_epoch(model, dataloader, criterion, optimizer, device, scaler=None):
-    """Treina por uma época."""
-    model.train()
+    """
+    Treina por uma época.
+    Para cada batch: move para GPU → forward → loss → backward → atualiza pesos.
+    """
+    model.train()  # Ativa modo treino (Dropout ativo)
     total_loss = 0.0
     correct = 0
     total = 0
@@ -33,16 +37,20 @@ def train_epoch(model, dataloader, criterion, optimizer, device, scaler=None):
     pbar = tqdm(dataloader, desc="Treinando")
     
     for videos, labels in pbar:
+        # PASSO 1: Mover batch para GPU (videos [16,16,3,224,224], labels [16])
         videos = videos.to(device, non_blocking=pin_memory)
         labels = labels.to(device, non_blocking=pin_memory)
         
+        # PASSO 2: Zerar gradientes da iteração anterior
         optimizer.zero_grad()
+        
+        # PASSO 3: Forward pass (modelo gera predições)
         if use_amp:
-            with autocast():
-                outputs = model(videos)
+            with autocast("cuda"):  # Mixed precision para economizar VRAM
+                outputs = model(videos)   # [16, 2] - logits para NonFight e Fight
                 loss = criterion(outputs, labels)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
+            scaler.scale(loss).backward()  # Calcula gradientes
+            scaler.step(optimizer)         # Atualiza pesos
             scaler.update()
         else:
             outputs = model(videos)
@@ -50,8 +58,9 @@ def train_epoch(model, dataloader, criterion, optimizer, device, scaler=None):
             loss.backward()
             optimizer.step()
         
+        # PASSO 4: Acumular métricas (loss e acurácia)
         total_loss += loss.item()
-        _, predicted = outputs.max(1)
+        _, predicted = outputs.max(1)       # Classe com maior score
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
         
@@ -64,14 +73,17 @@ def train_epoch(model, dataloader, criterion, optimizer, device, scaler=None):
 
 
 def validate(model, dataloader, criterion, device):
-    """Valida o modelo."""
+    """
+    Valida o modelo. Igual ao train_epoch mas sem backward/step.
+    model.eval() desativa Dropout, torch.no_grad() economiza memória.
+    """
     model.eval()
     total_loss = 0.0
     correct = 0
     total = 0
     pin_memory = device.type == "cuda"
     
-    with torch.no_grad():
+    with torch.no_grad():  # Não calcula gradientes (só inferência)
         for videos, labels in tqdm(dataloader, desc="Validando"):
             videos = videos.to(device, non_blocking=pin_memory)
             labels = labels.to(device, non_blocking=pin_memory)
@@ -88,6 +100,7 @@ def validate(model, dataloader, criterion, device):
 
 
 def main():
+    # ========== LEITURA DOS ARGUMENTOS ==========
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
@@ -101,7 +114,8 @@ def main():
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
     print(f"Usando dispositivo: {device}")
     
-    # Datasets
+    # ========== DATASETS ==========
+    # ViolenceVideoDataset: percorre train/Fight e train/NonFight, coleta .avi e labels (0 ou 1)
     print("Carregando datasets...")
     train_dataset = ViolenceVideoDataset(
         str(TRAIN_DIR),
@@ -118,7 +132,8 @@ def main():
         use_cache=args.use_cache
     )
     
-    # DataLoader com prefetch para GPU não ficar ociosa
+    # ========== DATALOADERS ==========
+    # Agrupa vídeos em batches. num_workers carrega em paralelo, prefetch mantém GPU ocupada
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -140,7 +155,7 @@ def main():
     
     print(f"Train: {len(train_dataset)} vídeos | Val: {len(val_dataset)} vídeos")
     
-    # Modelo, loss e otimizador
+    # ========== MODELO, LOSS E OTIMIZADOR ==========
     model = get_model(num_classes=2).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(
@@ -148,18 +163,19 @@ def main():
         lr=args.lr,
         weight_decay=WEIGHT_DECAY
     )
+    # ReduceLROnPlateau: reduz LR em 50% se val_acc não melhorar em 5 épocas
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=2
+        optimizer, mode="max", factor=0.5, patience=5
     )
     
-    # Mixed precision (AMP) para treinar mais rápido na GPU
+    # Mixed precision (AMP): usa float16 na GPU para ser mais rápido
     scaler = GradScaler() if device.type == "cuda" else None
     if scaler:
         print("Mixed precision (AMP) ativado para aceleração na GPU")
     if args.use_cache:
         print("Usando cache de frames (carregamento acelerado)")
     
-    # Treinamento
+    # ========== LOOP DE TREINAMENTO ==========
     best_val_acc = 0.0
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
     
@@ -174,7 +190,7 @@ def main():
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, scaler)
         val_loss, val_acc = validate(model, val_loader, criterion, device)
         
-        scheduler.step(val_acc)
+        scheduler.step(val_acc)  # Atualiza LR se val_acc não melhorou (patience)
         
         history["train_loss"].append(train_loss)
         history["train_acc"].append(train_acc)
@@ -184,7 +200,7 @@ def main():
         print(f"Train - Loss: {train_loss:.4f} | Acc: {train_acc:.2f}%")
         print(f"Val   - Loss: {val_loss:.4f} | Acc: {val_acc:.2f}%")
         
-        # Salvar melhor modelo
+        # Salvar melhor modelo (quando val_acc bate recorde)
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             save_path = MODELS_DIR / "best_violence_detector.pt"
@@ -197,7 +213,7 @@ def main():
             }, save_path)
             print(f"  -> Melhor modelo salvo! (acc: {val_acc:.2f}%)")
         
-        # Salvar checkpoint a cada 5 épocas
+        # Checkpoint a cada 5 épocas (para retomar treino se precisar)
         if (epoch + 1) % 5 == 0:
             torch.save({
                 "epoch": epoch + 1,
@@ -210,7 +226,7 @@ def main():
     print(f"Treinamento finalizado! Melhor validação: {best_val_acc:.2f}%")
     print("="*60)
     
-    # Salvar histórico para gráficos
+    # Salvar histórico (loss, acc por época) para visualize_training.py
     import json
     with open(RESULTS_DIR / "training_history.json", "w") as f:
         json.dump(history, f, indent=2)

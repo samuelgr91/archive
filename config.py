@@ -20,12 +20,12 @@ NUM_CLASSES = len(CLASSES)
 
 # Parâmetros dos vídeos (menos frames = mais rápido)
 IMG_SIZE = 224          # Tamanho da imagem para a rede (ResNet padrão)
-NUM_FRAMES = 8          # Número de frames extraídos por vídeo
+NUM_FRAMES = 16          # Número de frames extraídos por vídeo
 FRAME_SAMPLE_RATE = 2   # Pegar 1 frame a cada N frames (30fps -> ~15 frames no 5s)
 
-# Treinamento (batch maior = menos iterações por época)
-BATCH_SIZE = 32
-NUM_EPOCHS = 5
+# Treinamento (batch menor com 16 frames = menos uso de VRAM)
+BATCH_SIZE = 16
+NUM_EPOCHS = 20
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-5
 

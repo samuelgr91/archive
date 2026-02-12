@@ -90,6 +90,14 @@ python predict.py --video "RWF-2000/val/Fight/exemplo.avi"
 python visualize_training.py
 ```
 
+### 3.1 Matriz de confusão e métricas (sem treinar de novo)
+
+```bash
+python evaluate_metrics.py
+```
+
+Gera: matriz de confusão, curva ROC, precisão/recall/F1 por classe. Salva em `results/`.
+
 ### 4. Ver o modelo funcionando em vídeos
 
 ```bash
